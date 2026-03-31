@@ -2,6 +2,14 @@
 
 A standalone XModel viewer and gallery generator for **Call of Duty 1 (v1.1 - v1.5)**.
 
+## Gallery
+
+**[Browse the CoD1 XModels Gallery here](https://riicchhaarrd.github.io/cod1-xmodel-gallery/)**
+
+![Gallery Preview](https://riicchhaarrd.github.io/cod1-xmodel-gallery/gh-pages-preview.png)
+
+*The gallery and screenshots are hosted on the `gh-pages` branch to keep the source code clean.*
+
 ## Background
 
 When the CoD2 modtools were released, they included an extensive XModels Library for previewing assets. Call of Duty 1 never received such a dedicated tool, making it difficult for modders and archivists to quickly browse the hundreds of models tucked away in `.pk3` files. 
