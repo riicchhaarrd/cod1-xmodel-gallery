@@ -520,9 +520,11 @@ static bool loadXModel(const std::string &name, XModel &model)
 // ============================================================
 // Shader material table
 // Parse scripts/*.shader to map material name → first diffuse texture
+// and alpha mode (ALPHA_OPAQUE/CUTOUT/BLEND)
 // ============================================================
 
 static std::unordered_map<std::string,std::string> gShaderMap;
+static std::unordered_map<std::string,int>         gShaderAlphaMode;
 
 static void toLower(std::string &s){ for(char &c:s) if(c>='A'&&c<='Z') c+=32; }
 
@@ -561,6 +563,7 @@ static void parseShaderFile(const std::vector<uint8_t> &data)
         return text.substr(s,i-s);
     };
 
+    int alphaMode=-1; // -1 = not yet set for current shader
     while(i<n) {
         auto tok=readToken();
         if(tok.empty()) break;
@@ -568,10 +571,14 @@ static void parseShaderFile(const std::vector<uint8_t> &data)
             depth++;
         } else if(tok=="}") {
             depth--;
-            if(depth==0){curShader.clear();mapped.clear();}
+            if(depth==0){
+                if(!curShader.empty() && alphaMode>=0)
+                    gShaderAlphaMode[curShader]=alphaMode;
+                curShader.clear(); mapped.clear(); alphaMode=-1;
+            }
         } else if(depth==0) {
             curShader=tok; toLower(curShader);
-            mapped.clear();
+            mapped.clear(); alphaMode=-1;
         } else if(depth>0) {
             // Look for map/clampMap/animMap directives
             std::string tl=tok; toLower(tl);
@@ -590,6 +597,18 @@ static void parseShaderFile(const std::vector<uint8_t> &data)
                     mapped=val;
                     if(!curShader.empty()) gShaderMap[curShader]=mapped;
                 }
+            } else if(tl=="alphatest"||tl=="alpha") {
+                // alphaTest <value>  →  cutout
+                readToken(); // consume value
+                if(alphaMode<0) alphaMode=1; // ALPHA_CUTOUT
+            } else if(tl=="blendfunc") {
+                auto a=readToken(); toLower(a);
+                auto b=readToken(); toLower(b);
+                // blendFunc GL_ONE GL_ZERO (or "filter") = opaque
+                // anything else = blend
+                if(a=="gl_one"&&b=="gl_zero") { if(alphaMode<0) alphaMode=0; }
+                else if(a=="filter")          { if(alphaMode<0) alphaMode=0; }
+                else                          { if(alphaMode<0) alphaMode=2; } // ALPHA_BLEND
             }
         }
     }
@@ -910,10 +929,35 @@ enum {
     ALPHA_BLEND  = 2,
 };
 
+// Returns true if the texture at `path` has at least one pixel with alpha != 255
+// (i.e., it actually carries transparency data).  Result is cached.
+static bool textureHasAlphaData(const std::string &path)
+{
+    static std::unordered_map<std::string,bool> cache;
+    auto it=cache.find(path);
+    if(it!=cache.end()) return it->second;
+
+    auto data=gVFS.read(path);
+    if(data.empty()) return cache[path]=false;
+
+    std::vector<uint8_t> rgba;
+    int w=0,h=0;
+    if(!decodeToRGBA(data,rgba,w,h)) return cache[path]=false;
+
+    size_t total=(size_t)w*h;
+    for(size_t i=0;i<total;i++)
+        if(rgba[i*4+3]!=255){ cache[path]=true; return true; }
+    return cache[path]=false;
+}
+
 static int classifyAlphaMode(const std::string &matName)
 {
     std::string s=matName;
     toLower(s);
+
+    // Prefer the alpha mode recorded directly from the shader file
+    auto sit=gShaderAlphaMode.find(s);
+    if(sit!=gShaderAlphaMode.end()) return sit->second;
 
     auto path=resolveTexturePath(matName);
     if(!path.empty()) {
@@ -922,16 +966,35 @@ static int classifyAlphaMode(const std::string &matName)
     }
 
     if(s.find("_masked@") != std::string::npos ||
-       s.find("foliage_masked@") != std::string::npos ||
+       s.find("foliage") != std::string::npos ||
+       s.find("grass") != std::string::npos ||
+       s.find("plant") != std::string::npos ||
+       s.find("tree") != std::string::npos ||
+       s.find("leaf") != std::string::npos ||
+       s.find("leaves") != std::string::npos ||
+       s.find("bush") != std::string::npos ||
+       s.find("pine") != std::string::npos ||
+       s.find("palm") != std::string::npos ||
        s.find("fence") != std::string::npos ||
        s.find("wiremesh") != std::string::npos ||
        s.find("barbed") != std::string::npos ||
-       s.find("/net") != std::string::npos)
+       s.find("/net") != std::string::npos ||
+       s.find("chainlink") != std::string::npos)
+    {
+        // Only apply cutout if the texture actually carries alpha data.
+        // Textures loaded as JPEG / 24-bit TGA have alpha=255 everywhere;
+        // discarding with col.a > 0.5 would make the whole surface invisible.
+        if(!path.empty() && !textureHasAlphaData(path))
+            return ALPHA_OPAQUE;
         return ALPHA_CUTOUT;
+    }
 
     if(s.find("decal@") != std::string::npos ||
        s.find("transparents/") != std::string::npos ||
-       s.find("glass") != std::string::npos)
+       s.find("glass") != std::string::npos ||
+       s.find("smoke") != std::string::npos ||
+       s.find("cloud") != std::string::npos ||
+       s.find("alpha") != std::string::npos)
         return ALPHA_BLEND;
 
     return ALPHA_OPAQUE;
@@ -1213,11 +1276,11 @@ static void renderModel(const std::vector<GPUSurf> &surfs, GLuint prog,
 {
     glViewport(0,0,W,H);
     glClearColor(0.18f,0.18f,0.22f,1.f);
+    glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE);
 
     // Clamp elevation so we don't flip through the poles
     if(phi> 1.48f) phi= 1.48f;
